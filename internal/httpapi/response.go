@@ -46,6 +46,14 @@ func mapError(err error) (int, errorBody) {
 			status = http.StatusConflict
 		case domain.CodeLimitExceeded:
 			status = http.StatusRequestEntityTooLarge
+		case domain.CodeRequestCanceled:
+			// The caller abandoned the request: not a client format error and
+			// not a server-side timeout.
+			status = http.StatusRequestTimeout
+		case domain.CodeRequestTimeout:
+			// The server-side deadline elapsed. This is a stable, retryable
+			// timeout that must never be classified as invalid input.
+			status = http.StatusGatewayTimeout
 		case domain.CodePersistenceFailure, domain.CodeInconsistentState:
 			status = http.StatusInternalServerError
 		}
@@ -62,7 +70,7 @@ func mapError(err error) (int, errorBody) {
 	if errors.Is(err, context.Canceled) {
 		return http.StatusRequestTimeout, errorBody{
 			Code:    "request_canceled",
-			Message: "request context was canceled",
+			Message: "request was canceled",
 		}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

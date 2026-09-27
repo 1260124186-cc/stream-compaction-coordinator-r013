@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,9 +15,17 @@ import (
 const DefaultMaximumSnapshotBytes = int64(64 << 20)
 
 // Repository is the durable boundary used by the application package.
+//
+// SaveContext is the deadline-aware variant used by request processing. A
+// context error returned before the snapshot is durably committed means no
+// state was published. Once the atomic commit lands, the method returns nil
+// even if the context has since expired, because an already committed result
+// must be reported as success so retries stay idempotent instead of racing a
+// second result into place.
 type Repository interface {
 	Load() (*domain.State, error)
 	Save(*domain.State) error
+	SaveContext(ctx context.Context, state *domain.State) error
 	Path() string
 }
 
@@ -89,6 +98,10 @@ func (r *FileRepository) Load() (*domain.State, error) {
 }
 
 func (r *FileRepository) Save(state *domain.State) error {
+	return r.SaveContext(context.Background(), state)
+}
+
+func (r *FileRepository) SaveContext(ctx context.Context, state *domain.State) error {
 	if r == nil {
 		return domain.NewError(domain.CodePersistenceFailure, "file repository is nil")
 	}
@@ -116,7 +129,10 @@ func (r *FileRepository) Save(state *domain.State) error {
 			WithDetail("maximum_bytes", r.maximumBytes).
 			WithDetail("actual_bytes", len(data))
 	}
-	if err := WriteAtomically(r.path, data); err != nil {
+	if err := WriteAtomicallyContext(ctx, r.path, data); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		return domain.WrapError(
 			domain.CodePersistenceFailure,
 			"cannot commit state snapshot",
@@ -158,8 +174,15 @@ func (r *InMemoryRepository) Load() (*domain.State, error) {
 }
 
 func (r *InMemoryRepository) Save(state *domain.State) error {
+	return r.SaveContext(context.Background(), state)
+}
+
+func (r *InMemoryRepository) SaveContext(ctx context.Context, state *domain.State) error {
 	if r == nil {
 		return domain.NewError(domain.CodePersistenceFailure, "memory repository is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := domain.ValidateState(state); err != nil {
 		return err

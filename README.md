@@ -152,7 +152,16 @@ production checks exercise the real HTTP handler and file-backed state:
 go run ./cmd/segmentd verify append-rollover
 go run ./cmd/segmentd verify compaction-recovery
 go run ./cmd/segmentd verify replica-watermark
+go run ./cmd/segmentd verify request-deadlines
 ```
+
+The `request-deadlines` check drives a controllable slow repository and two API
+instances (normal and very short per-request deadline) to verify that elapsed
+deadlines return `504 request_timeout`, canceled requests return
+`408 request_canceled` (both distinct from `400 invalid_input`), unfinished
+requests never publish state, a commit that wins a deadline race is reported as
+success and stays idempotent on retry, and the result survives both a current
+read and a restart read.
 
 Each command creates a temporary state directory, performs its workflow, and
 prints the workflow name, assertion count, and status. The commands do not

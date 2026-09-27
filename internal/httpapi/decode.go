@@ -17,6 +17,9 @@ func decodeJSON(
 	maximumBytes int64,
 	target any,
 ) error {
+	if err := request.Context().Err(); err != nil {
+		return err
+	}
 	contentType := request.Header.Get("Content-Type")
 	if contentType != "" && !strings.HasPrefix(strings.ToLower(contentType), "application/json") {
 		return domain.NewError(
@@ -28,6 +31,9 @@ func decodeJSON(
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
+		if request.Context().Err() != nil {
+			return request.Context().Err()
+		}
 		return decodeError(err)
 	}
 	if err := ensureNoExtraJSON(decoder); err != nil {

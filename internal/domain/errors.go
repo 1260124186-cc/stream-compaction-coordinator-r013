@@ -19,6 +19,8 @@ const (
 	CodeLimitExceeded      ErrorCode = "limit_exceeded"
 	CodePersistenceFailure ErrorCode = "persistence_failure"
 	CodeInconsistentState  ErrorCode = "inconsistent_state"
+	CodeRequestTimeout     ErrorCode = "request_timeout"
+	CodeRequestCanceled    ErrorCode = "request_canceled"
 )
 
 // Error is a stable domain error that can cross application and transport

@@ -233,10 +233,33 @@ go run ./cmd/segmentd serve
 go run ./cmd/segmentd verify append-rollover
 go run ./cmd/segmentd verify compaction-recovery
 go run ./cmd/segmentd verify replica-watermark
+go run ./cmd/segmentd verify request-deadlines
 ```
 
 The `verify` commands construct a temporary storage directory and exercise the real HTTP
 handler through `httptest`. They are production smoke checks, not a test suite.
+The `request-deadlines` check additionally uses a controllable slow repository
+plus a very short per-request deadline to verify cancellation and timeout
+semantics across processing start, the serialized commit wait, and persistence.
+
+## Request lifecycle errors
+
+The same request deadline is observed before processing starts, while waiting
+for the serialized mutation gate, and at every checkpoint of durable
+publication. The external contract is stable and retryable:
+
+| Condition | HTTP status | Error code |
+| --- | --- | --- |
+| Server-side deadline elapsed | 504 | `request_timeout` |
+| Request canceled by the caller | 408 | `request_canceled` |
+| Malformed or invalid request | 400 | `invalid_input` / `invalid_range` / `overflow` |
+| Stale revision or state conflict | 409 | `stale_revision` / `conflict` / ... |
+
+Timeout and cancellation are never reported as `invalid_input`. A request whose
+deadline passes before publication is abandoned without changing state, so it
+is safe to retry. Once a snapshot commit lands, the result is published even if
+the context expired during the write; the response reports success and an
+identical retry returns the idempotent result instead of a fabricated timeout.
 
 ## Validation plan and deferred tests
 

@@ -8,10 +8,10 @@ import (
 )
 
 func (s *Service) GetStream(ctx context.Context, streamID string) (*domain.Stream, error) {
-	if err := contextError(ctx); err != nil {
+	state, err := s.readState(ctx)
+	if err != nil {
 		return nil, err
 	}
-	state := s.readState()
 	stream := storage.FindStream(state, normalizedIdentifier(streamID))
 	if stream == nil {
 		return nil, resourceNotFound("stream", streamID)
@@ -20,10 +20,10 @@ func (s *Service) GetStream(ctx context.Context, streamID string) (*domain.Strea
 }
 
 func (s *Service) GetSegment(ctx context.Context, segmentID string) (*domain.Segment, error) {
-	if err := contextError(ctx); err != nil {
+	state, err := s.readState(ctx)
+	if err != nil {
 		return nil, err
 	}
-	state := s.readState()
 	segment := storage.FindSegment(state, normalizedIdentifier(segmentID))
 	if segment == nil {
 		return nil, resourceNotFound("segment", segmentID)
@@ -35,10 +35,10 @@ func (s *Service) GetCompactionPlan(
 	ctx context.Context,
 	planID string,
 ) (*domain.CompactionPlan, error) {
-	if err := contextError(ctx); err != nil {
+	state, err := s.readState(ctx)
+	if err != nil {
 		return nil, err
 	}
-	state := s.readState()
 	plan := storage.FindPlan(state, normalizedIdentifier(planID))
 	if plan == nil {
 		return nil, resourceNotFound("compaction plan", planID)
@@ -47,10 +47,10 @@ func (s *Service) GetCompactionPlan(
 }
 
 func (s *Service) GetWatermark(ctx context.Context, streamID string) (WatermarkResult, error) {
-	if err := contextError(ctx); err != nil {
+	state, err := s.readState(ctx)
+	if err != nil {
 		return WatermarkResult{}, err
 	}
-	state := s.readState()
 	stream := storage.FindStream(state, normalizedIdentifier(streamID))
 	if stream == nil {
 		return WatermarkResult{}, resourceNotFound("stream", streamID)
@@ -67,10 +67,10 @@ func (s *Service) ListSegments(
 	ctx context.Context,
 	filter storage.SegmentFilter,
 ) ([]*domain.Segment, error) {
-	if err := contextError(ctx); err != nil {
+	state, err := s.readState(ctx)
+	if err != nil {
 		return nil, err
 	}
-	state := s.readState()
 	if filter.StreamID != "" && state.Streams[filter.StreamID] == nil {
 		return nil, resourceNotFound("stream", filter.StreamID)
 	}
