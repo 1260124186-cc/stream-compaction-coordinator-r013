@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,10 +9,16 @@ import (
 
 // WriteAtomically writes a complete sibling file and renames it into place.
 // The file and parent directory are synchronized so a crash cannot commit a
-// partially written snapshot on a local filesystem.
-func WriteAtomically(path string, data []byte) error {
+// partially written snapshot on a local filesystem. The context is honored
+// while the result is still provisional; once the rename succeeds the
+// snapshot is committed and the remaining directory synchronization runs to
+// completion regardless of cancellation.
+func WriteAtomically(ctx context.Context, path string, data []byte) error {
 	if path == "" {
 		return fmt.Errorf("path must not be empty")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
@@ -38,12 +45,19 @@ func WriteAtomically(path string, data []byte) error {
 		_ = temporary.Close()
 		return fmt.Errorf("write temporary snapshot: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("synchronize temporary snapshot: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close temporary snapshot: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("rename temporary snapshot: %w", err)

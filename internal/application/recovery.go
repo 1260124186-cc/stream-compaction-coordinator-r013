@@ -12,9 +12,17 @@ func (s *Service) Recover(ctx context.Context) (RecoveryReport, error) {
 	if err := contextError(ctx); err != nil {
 		return RecoveryReport{}, err
 	}
+	if err := s.acquireMutation(ctx); err != nil {
+		return RecoveryReport{}, err
+	}
+	defer func() { <-s.mutationGate }()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := contextError(ctx); err != nil {
+		return RecoveryReport{}, err
+	}
 	next := domain.CloneState(s.state)
 	report, err := recoverState(next, s.clock.Now())
 	if err != nil {
@@ -23,7 +31,14 @@ func (s *Service) Recover(ctx context.Context) (RecoveryReport, error) {
 	if !report.Changed {
 		return report, nil
 	}
-	if err := s.repo.Save(next); err != nil {
+	if err := contextError(ctx); err != nil {
+		return RecoveryReport{}, err
+	}
+	if err := s.repo.Save(ctx, next); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && s.isCommitted(next) {
+			s.state = next
+			return report, nil
+		}
 		return RecoveryReport{}, err
 	}
 	s.state = next

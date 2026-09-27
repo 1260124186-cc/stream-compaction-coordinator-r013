@@ -142,6 +142,22 @@ Every error uses one JSON object:
 }
 ```
 
+Cancellation and timeouts have their own stable classification so callers can
+distinguish a retryable deadline from a malformed or conflicting request:
+
+| Situation | HTTP status | Error code |
+| --- | --- | --- |
+| Client canceled the request | `408` | `request_canceled` |
+| Request deadline exceeded | `504` | `request_timeout` |
+| Malformed / invalid request | `400` | `invalid_input`, `invalid_range`, ... |
+| Stale revision / conflict | `409` | `stale_revision`, `conflict`, ... |
+
+The same deadline is enforced before processing starts, while waiting for
+the single mutation gate, and during persistence. A request that has not
+committed never publishes state; a result that has already been committed is
+published and returned even when the deadline elapsed during the write, so a
+retry replays the same result instead of creating a second one.
+
 ## Workflow checks
 
 The initialization baseline has no test suite. Tests are intentionally
@@ -152,11 +168,18 @@ production checks exercise the real HTTP handler and file-backed state:
 go run ./cmd/segmentd verify append-rollover
 go run ./cmd/segmentd verify compaction-recovery
 go run ./cmd/segmentd verify replica-watermark
+go run ./cmd/segmentd verify deadline-semantics
 ```
 
 Each command creates a temporary state directory, performs its workflow, and
 prints the workflow name, assertion count, and status. The commands do not
-contact a network service and clean up their temporary data.
+contact a network service and clean up their temporary data. The
+`deadline-semantics` check drives a controllable slow repository to verify
+that pre-processing, gate-wait, and persistence-phase deadlines return a
+stable `504 request_timeout` (client cancellation returns
+`408 request_canceled`), that timed-out requests never publish state on the
+current or restarted read, and that a commit landing during the deadline is
+published once and replays idempotently.
 
 ## Directory structure
 

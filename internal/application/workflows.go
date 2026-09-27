@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"sort"
 
 	"github.com/1260124186-cc/solo-0017-stream-compaction/internal/domain"
 	"github.com/1260124186-cc/solo-0017-stream-compaction/internal/storage"
@@ -127,6 +128,24 @@ func (s *Service) CreateCompactionPlan(
 		if stream == nil {
 			return resourceNotFound("stream", streamID)
 		}
+
+		// A retried create that committed before the caller observed the
+		// deadline replays the existing active plan instead of producing a
+		// second plan over the same sources.
+		if replay, conflict, err := replayCompactionPlan(
+			state,
+			stream,
+			command.SourceSegmentIDs,
+			command.ExpectedStreamRevision,
+		); err != nil {
+			return err
+		} else if replay != nil {
+			result = CompactionPlanResult{Plan: clonePlan(replay)}
+			return nil
+		} else if conflict != nil {
+			return conflict
+		}
+
 		planID := s.ids.New("cmp")
 		if state.Plans[planID] != nil {
 			return domain.NewError(domain.CodeConflict, "generated plan identifier is already in use")
@@ -173,6 +192,13 @@ func (s *Service) StartCompactionPlan(
 		stream := state.Streams[plan.StreamID]
 		if stream == nil {
 			return domain.NewError(domain.CodeInconsistentState, "plan stream was not found")
+		}
+		// Replaying a start that committed before the deadline was observed
+		// returns the running plan instead of rejecting the retry as invalid
+		// state.
+		if plan.State == domain.PlanStateRunning {
+			result = CompactionPlanResult{Plan: clonePlan(plan)}
+			return nil
 		}
 		if err := domain.StartCompactionPlan(plan, stream, state.Segments, timeline.Now()); err != nil {
 			return err
@@ -300,6 +326,70 @@ func (s *Service) AcknowledgeReplica(
 		return nil
 	})
 	return result, err
+}
+
+// replayCompactionPlan handles a retried plan creation. An active
+// (proposed or running) plan with the exact same source set and expected
+// stream revision is treated as an idempotent replay and returned. A request
+// overlapping an existing active plan in any other way is a genuine conflict.
+// Plans already completed or aborted do not block: their sources are no
+// longer sealed and are rejected by the normal validation path.
+func replayCompactionPlan(
+	state *domain.State,
+	stream *domain.Stream,
+	sourceSegmentIDs []string,
+	expectedRevision uint64,
+) (*domain.CompactionPlan, error, error) {
+	planIDs := make([]string, 0, len(state.Plans))
+	for id, plan := range state.Plans {
+		if plan != nil && plan.StreamID == stream.ID &&
+			(plan.State == domain.PlanStateProposed || plan.State == domain.PlanStateRunning) {
+			planIDs = append(planIDs, id)
+		}
+	}
+	sort.Strings(planIDs)
+
+	for _, id := range planIDs {
+		plan := state.Plans[id]
+		if sameStringSet(plan.SourceSegmentIDs, sourceSegmentIDs) {
+			if plan.ExpectedStreamRevision == expectedRevision {
+				return plan, nil, nil
+			}
+			return nil, domain.NewError(
+				domain.CodeConflict,
+				"an active plan for these sources uses a different stream revision",
+			).WithDetail("plan_id", plan.ID), nil
+		}
+		for _, segmentID := range sourceSegmentIDs {
+			for _, existingID := range plan.SourceSegmentIDs {
+				if segmentID == existingID {
+					return nil, domain.NewError(
+						domain.CodeConflict,
+						"source segment is already part of an active compaction plan",
+					).
+						WithDetail("plan_id", plan.ID).
+						WithDetail("segment_id", segmentID), nil
+				}
+			}
+		}
+	}
+	return nil, nil, nil
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		seen[value] = struct{}{}
+	}
+	for _, value := range right {
+		if _, ok := seen[value]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneStream(source *domain.Stream) *domain.Stream {

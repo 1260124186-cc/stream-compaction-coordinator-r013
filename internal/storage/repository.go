@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -16,7 +17,7 @@ const DefaultMaximumSnapshotBytes = int64(64 << 20)
 // Repository is the durable boundary used by the application package.
 type Repository interface {
 	Load() (*domain.State, error)
-	Save(*domain.State) error
+	Save(ctx context.Context, state *domain.State) error
 	Path() string
 }
 
@@ -88,12 +89,15 @@ func (r *FileRepository) Load() (*domain.State, error) {
 	return state, nil
 }
 
-func (r *FileRepository) Save(state *domain.State) error {
+func (r *FileRepository) Save(ctx context.Context, state *domain.State) error {
 	if r == nil {
 		return domain.NewError(domain.CodePersistenceFailure, "file repository is nil")
 	}
 	if state == nil {
 		return domain.NewError(domain.CodePersistenceFailure, "cannot persist a nil state")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := domain.ValidateState(state); err != nil {
 		return domain.WrapError(
@@ -116,7 +120,13 @@ func (r *FileRepository) Save(state *domain.State) error {
 			WithDetail("maximum_bytes", r.maximumBytes).
 			WithDetail("actual_bytes", len(data))
 	}
-	if err := WriteAtomically(r.path, data); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := WriteAtomically(ctx, r.path, data); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return ctxErr
+		}
 		return domain.WrapError(
 			domain.CodePersistenceFailure,
 			"cannot commit state snapshot",
@@ -157,9 +167,12 @@ func (r *InMemoryRepository) Load() (*domain.State, error) {
 	return domain.CloneState(r.state), nil
 }
 
-func (r *InMemoryRepository) Save(state *domain.State) error {
+func (r *InMemoryRepository) Save(ctx context.Context, state *domain.State) error {
 	if r == nil {
 		return domain.NewError(domain.CodePersistenceFailure, "memory repository is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := domain.ValidateState(state); err != nil {
 		return err

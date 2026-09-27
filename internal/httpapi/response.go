@@ -46,6 +46,10 @@ func mapError(err error) (int, errorBody) {
 			status = http.StatusConflict
 		case domain.CodeLimitExceeded:
 			status = http.StatusRequestEntityTooLarge
+		case domain.CodeRequestCanceled:
+			status = http.StatusRequestTimeout
+		case domain.CodeRequestTimeout:
+			status = http.StatusGatewayTimeout
 		case domain.CodePersistenceFailure, domain.CodeInconsistentState:
 			status = http.StatusInternalServerError
 		}

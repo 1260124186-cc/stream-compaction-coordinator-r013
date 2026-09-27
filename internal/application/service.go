@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -20,13 +21,14 @@ type Limits struct {
 }
 
 type Service struct {
-	mu     sync.RWMutex
-	state  *domain.State
-	repo   storage.Repository
-	ids    idgen.Generator
-	clock  clock.Clock
-	logger observability.Logger
-	limits Limits
+	mu           sync.RWMutex
+	mutationGate chan struct{}
+	state        *domain.State
+	repo         storage.Repository
+	ids          idgen.Generator
+	clock        clock.Clock
+	logger       observability.Logger
+	limits       Limits
 }
 
 func NewService(
@@ -64,7 +66,7 @@ func NewService(
 		return nil, err
 	}
 	if report.Changed {
-		if err := repository.Save(loaded); err != nil {
+		if err := repository.Save(context.Background(), loaded); err != nil {
 			return nil, err
 		}
 		logger.Info("startup.recovered", map[string]any{
@@ -74,12 +76,13 @@ func NewService(
 	}
 
 	return &Service{
-		state:  loaded,
-		repo:   repository,
-		ids:    identifiers,
-		clock:  timeSource,
-		logger: logger,
-		limits: limits,
+		mutationGate: make(chan struct{}, 1),
+		state:        loaded,
+		repo:         repository,
+		ids:          identifiers,
+		clock:        timeSource,
+		logger:       logger,
+		limits:       limits,
 	}, nil
 }
 
@@ -96,6 +99,13 @@ func (s *Service) readState() *domain.State {
 	return domain.CloneState(s.state)
 }
 
+// mutate runs one state-changing workflow under the single serialization
+// boundary. The request deadline is honored at three points: before any
+// work starts, while waiting for the serialization gate, and while waiting
+// for persistence. Once persistence has committed the snapshot the result
+// is published and the request succeeds even if the deadline elapsed during
+// the write, so a retried request can never create a second result or be
+// told a committed mutation timed out.
 func (s *Service) mutate(
 	ctx context.Context,
 	action string,
@@ -104,6 +114,11 @@ func (s *Service) mutate(
 	if err := contextError(ctx); err != nil {
 		return err
 	}
+
+	if err := s.acquireMutation(ctx); err != nil {
+		return err
+	}
+	defer func() { <-s.mutationGate }()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -122,7 +137,22 @@ func (s *Service) mutate(
 	if err := contextError(ctx); err != nil {
 		return err
 	}
-	if err := s.repo.Save(next); err != nil {
+
+	if err := s.repo.Save(ctx, next); err != nil {
+		// The write may have committed durably (for example a successful
+		// rename followed by a directory sync failure). If the deadline is
+		// what stopped the request but the snapshot is already on disk,
+		// publish it and report success rather than advertising a timeout
+		// for a result the caller will replay.
+		if ctxErr := ctx.Err(); ctxErr != nil && s.isCommitted(next) {
+			s.state = next
+			s.logger.Info("state.committed", map[string]any{
+				"action":          action,
+				"path":            s.repo.Path(),
+				"published_after": contextKind(ctxErr),
+			})
+			return nil
+		}
 		s.logger.Error("state.commit.failed", err, map[string]any{
 			"action": action,
 			"path":   s.repo.Path(),
@@ -137,6 +167,58 @@ func (s *Service) mutate(
 	return nil
 }
 
+// acquireMutation waits for the serialization gate while remaining
+// interruptible by the request deadline or cancellation.
+func (s *Service) acquireMutation(ctx context.Context) error {
+	select {
+	case s.mutationGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return contextError(ctx)
+	}
+}
+
+// isCommitted reports whether the durable snapshot on disk already contains
+// the candidate state. It performs a read-only reload and never mutates
+// service state.
+func (s *Service) isCommitted(candidate *domain.State) bool {
+	persisted, err := s.repo.Load()
+	if err != nil {
+		return false
+	}
+	return stateSnapshotCommitted(persisted, candidate)
+}
+
+// stateSnapshotCommitted recognizes the candidate snapshot on disk. Every
+// mutation adds entities and/or advances a stream revision, and the
+// serialization gate guarantees no other commit can interleave, so equal
+// revisions and the presence of every candidate entity identify this commit.
+func stateSnapshotCommitted(persisted, candidate *domain.State) bool {
+	if persisted == nil || candidate == nil {
+		return false
+	}
+	for id, stream := range candidate.Streams {
+		if stream == nil {
+			continue
+		}
+		saved, ok := persisted.Streams[id]
+		if !ok || saved == nil || saved.Revision != stream.Revision {
+			return false
+		}
+	}
+	for id := range candidate.Segments {
+		if _, ok := persisted.Segments[id]; !ok {
+			return false
+		}
+	}
+	for id := range candidate.Plans {
+		if _, ok := persisted.Plans[id]; !ok {
+			return false
+		}
+	}
+	return persisted.AuditSequence >= candidate.AuditSequence
+}
+
 type domainTimeline struct {
 	current time.Time
 }
@@ -149,11 +231,17 @@ func contextError(ctx context.Context) error {
 	if ctx == nil {
 		return nil
 	}
-	select {
-	case <-ctx.Done():
-		return domain.WrapError(domain.CodeInvalidInput, "operation was canceled", ctx.Err())
+	return domain.FromContextError(ctx.Err())
+}
+
+func contextKind(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
 	default:
-		return nil
+		return "context_done"
 	}
 }
 

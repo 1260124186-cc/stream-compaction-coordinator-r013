@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -19,6 +20,8 @@ const (
 	CodeLimitExceeded      ErrorCode = "limit_exceeded"
 	CodePersistenceFailure ErrorCode = "persistence_failure"
 	CodeInconsistentState  ErrorCode = "inconsistent_state"
+	CodeRequestCanceled    ErrorCode = "request_canceled"
+	CodeRequestTimeout     ErrorCode = "request_timeout"
 )
 
 // Error is a stable domain error that can cross application and transport
@@ -48,6 +51,23 @@ func WrapError(code ErrorCode, message string, cause error) *Error {
 		Message: message,
 		Details: map[string]any{},
 		Cause:   cause,
+	}
+}
+
+// FromContextError translates a context cancellation or deadline error into a
+// stable domain error while preserving the original cause so errors.Is still
+// matches context.Canceled or context.DeadlineExceeded. Any other error,
+// including nil, is returned unchanged.
+func FromContextError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, context.DeadlineExceeded):
+		return WrapError(CodeRequestTimeout, "request deadline was exceeded", err)
+	case errors.Is(err, context.Canceled):
+		return WrapError(CodeRequestCanceled, "request context was canceled", err)
+	default:
+		return err
 	}
 }
 

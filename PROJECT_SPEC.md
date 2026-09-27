@@ -233,6 +233,7 @@ go run ./cmd/segmentd serve
 go run ./cmd/segmentd verify append-rollover
 go run ./cmd/segmentd verify compaction-recovery
 go run ./cmd/segmentd verify replica-watermark
+go run ./cmd/segmentd verify deadline-semantics
 ```
 
 The `verify` commands construct a temporary storage directory and exercise the real HTTP

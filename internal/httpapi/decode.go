@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,9 @@ func decodeJSON(
 }
 
 func decodeError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return domain.FromContextError(err)
+	}
 	var maximumErr *http.MaxBytesError
 	if errors.As(err, &maximumErr) {
 		return domain.NewError(domain.CodeLimitExceeded, "request body exceeds the configured limit").
